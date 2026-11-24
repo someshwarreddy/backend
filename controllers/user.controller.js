@@ -2,7 +2,7 @@
 const User = require('../models/user.model');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
-// Get all users (Admin only)
+const { sendActivationEmail } = require('../services/email.service');
 // Get all users (Admin only)
 exports.getAllUsers = async (req, res) => {
   try {
@@ -13,13 +13,13 @@ exports.getAllUsers = async (req, res) => {
 
     const filter = search
       ? {
-          $or: [
-            { name: { $regex: search, $options: 'i' } },
-            { email: { $regex: search, $options: 'i' } },
-            { role: { $regex: search, $options: 'i' } },
-            { status: { $regex: search, $options: 'i' } }
-          ]
-        }
+        $or: [
+          { name: { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } },
+          { role: { $regex: search, $options: 'i' } },
+          { status: { $regex: search, $options: 'i' } }
+        ]
+      }
       : {};
 
     const [users, total] = await Promise.all([
@@ -149,6 +149,22 @@ exports.createUser = async (req, res) => {
     });
 
     await user.save();
+    let emailSent = false;
+
+    const activationUrl =
+      `${process.env.FRONTEND_URL}/activate?token=${encodeURIComponent(activationToken)}`;
+
+    try {
+      await sendActivationEmail({
+        to: user.email,
+        name: user.name,
+        activationUrl
+      });
+
+      emailSent = true;
+    } catch (emailError) {
+      console.error('Activation email error:', emailError);
+    }
 
     // Never expose the activation token in production.
     const response = {
@@ -166,7 +182,19 @@ exports.createUser = async (req, res) => {
       response.activationToken = activationToken;
     }
 
-    res.status(201).json(response);
+    return res.status(201).json({
+      message: emailSent
+        ? 'User created successfully. Activation email sent.'
+        : 'User created successfully, but activation email could not be sent. Please resend activation.',
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        status: user.status
+      },
+      emailSent
+    });
 
   } catch (error) {
     console.error('Create user error:', error);
@@ -214,21 +242,40 @@ exports.resendActivation = async (req, res) => {
     );
 
     await user.save();
+    const activationUrl =
+      `${process.env.FRONTEND_URL}/activate?token=${encodeURIComponent(activationToken)}`;
 
-    const response = {
-      message: 'A new activation token has been generated',
+    let emailSent = false;
+
+    try {
+      await sendActivationEmail({
+        to: user.email,
+        name: user.name,
+        activationUrl
+      });
+
+      emailSent = true;
+    } catch (emailError) {
+      console.error('Resend activation email error:', emailError);
+    }
+
+    return res.status(200).json({
+      message: emailSent
+        ? 'Activation email sent successfully'
+        : 'Activation token generated, but email could not be sent',
       user: {
         id: user._id,
         name: user.name,
         email: user.email,
         status: user.status
-      }
-    };
+      },
+      emailSent
+    });
 
-    // Development testing only
-    if (process.env.NODE_ENV !== 'production') {
-      response.activationToken = activationToken;
-    }
+   // Development testing only
+if (process.env.NODE_ENV !== 'production') {
+  response.activationToken = activationToken;
+}
 
     return res.status(200).json(response);
 
@@ -240,7 +287,7 @@ exports.resendActivation = async (req, res) => {
     });
   }
 };
-  // Upload user profile image
+// Upload user profile image
 exports.uploadProfileImage = async (req, res) => {
   try {
     if (!req.file) {

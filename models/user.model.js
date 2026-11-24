@@ -44,6 +44,10 @@ const userSchema = new mongoose.Schema(
       type: Date,
       select: false
     },
+    activationEmailSentAt: {
+      type: Date,
+      default: null
+    },
     phone: {
       type: String,
       default: ''

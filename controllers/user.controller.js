@@ -2,6 +2,7 @@
 const User = require('../models/user.model');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
+const mongoose = require('mongoose');
 const { sendActivationEmail } = require('../services/email.service');
 // Get all users (Admin only)
 exports.getAllUsers = async (req, res) => {
@@ -205,11 +206,19 @@ exports.createUser = async (req, res) => {
   }
 };
 
+
 exports.resendActivation = async (req, res) => {
+
+  let lockUntil;
+
   try {
     const { id } = req.params;
-
-    // Find the user
+    if (!mongoose.isObjectIdOrHexString(id)) {
+      return res.status(400).json({
+        message: 'Invalid user ID'
+      });
+    }
+    // 1. Find the user
     const user = await User.findById(id);
 
     if (!user) {
@@ -218,75 +227,185 @@ exports.resendActivation = async (req, res) => {
       });
     }
 
-    // Only pending accounts need activation
+    // 2. Check account status
     if (user.status === 'active') {
       return res.status(409).json({
         message: 'This account is already activated'
       });
     }
 
-    // Generate a fresh activation token
+    // 3. Calculate cooldown and lock dates
+    const now = new Date();
+    const cooldown = 60 * 1000;
+
+    const cooldownDate = new Date(
+      now.getTime() - cooldown
+    );
+
+    lockUntil = new Date(
+      now.getTime() + 2 * 60 * 1000
+    );
+
+    // 4. Atomically check cooldown and reserve email sending
+    const reservedUser = await User.findOneAndUpdate(
+      {
+        _id: id,
+        status: 'pending',
+
+        $and: [
+          {
+            $or: [
+              { activationEmailSentAt: null },
+              {
+                activationEmailSentAt: {
+                  $lte: cooldownDate
+                }
+              }
+            ]
+          },
+          {
+            $or: [
+              { activationEmailLockUntil: null },
+              {
+                activationEmailLockUntil: {
+                  $lte: now
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        $set: {
+          activationEmailLockUntil: lockUntil
+        }
+      },
+      {
+        new: true
+      }
+    );
+
+    if (!reservedUser) {
+      return res.status(429).json({
+        message: 'Please wait before resending the activation email.'
+      });
+    }
+
+    // 5. Generate a fresh activation token
     const activationToken = crypto
       .randomBytes(32)
       .toString('hex');
 
-    // Store only the hashed token
+    // 6. Store only the hashed token
     const activationTokenHash = crypto
       .createHash('sha256')
       .update(activationToken)
       .digest('hex');
 
-    user.activationTokenHash = activationTokenHash;
-    user.activationTokenExpires = new Date(
+    reservedUser.activationTokenHash = activationTokenHash;
+
+    reservedUser.activationTokenExpires = new Date(
       Date.now() + 24 * 60 * 60 * 1000
     );
 
-    await user.save();
+    await reservedUser.save();
+
+    // 7. Generate activation URL
     const activationUrl =
       `${process.env.FRONTEND_URL}/activate?token=${encodeURIComponent(activationToken)}`;
 
-    let emailSent = false;
-
+    // 8. Send activation email
     try {
       await sendActivationEmail({
-        to: user.email,
-        name: user.name,
+        to: reservedUser.email,
+        name: reservedUser.name,
         activationUrl
       });
 
-      emailSent = true;
+      // 9. Record successful email and release lock
+      const updateResult = await User.updateOne(
+        {
+          _id: id,
+          activationEmailLockUntil: lockUntil
+        },
+        {
+          $set: {
+            activationEmailSentAt: new Date()
+          },
+          $unset: {
+            activationEmailLockUntil: 1
+          }
+        }
+      );
+
+      if (updateResult.modifiedCount !== 1) {
+        console.error('Email sent, but lock cleanup failed:', id);
+      }
+
+      return res.status(200).json({
+        message: 'Activation email sent successfully',
+        user: {
+          id: reservedUser._id,
+          name: reservedUser.name,
+          email: reservedUser.email,
+          status: reservedUser.status
+        },
+        emailSent: true
+      });
+
     } catch (emailError) {
-      console.error('Resend activation email error:', emailError);
+      console.error(
+        'Resend activation email error:',
+        emailError
+      );
+
+      // 10. Release lock if email sending fails
+      await User.updateOne(
+        {
+          _id: id,
+          activationEmailLockUntil: lockUntil
+        },
+        {
+          $unset: {
+            activationEmailLockUntil: 1
+          }
+        }
+      );
+
+      return res.status(500).json({
+        message: 'Activation email could not be sent. Please try again.',
+        emailSent: false
+      });
     }
-
-    return res.status(200).json({
-      message: emailSent
-        ? 'Activation email sent successfully'
-        : 'Activation token generated, but email could not be sent',
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        status: user.status
-      },
-      emailSent
-    });
-
-   // Development testing only
-if (process.env.NODE_ENV !== 'production') {
-  response.activationToken = activationToken;
-}
-
-    return res.status(200).json(response);
 
   } catch (error) {
     console.error('Resend activation error:', error);
 
+    // Release lock if an unexpected error occurs after reservation
+    if (lockUntil) {
+      try {
+        await User.updateOne(
+          {
+            _id: req.params.id,
+            activationEmailLockUntil: lockUntil
+          },
+          {
+            $unset: {
+              activationEmailLockUntil: 1
+            }
+          }
+        );
+      } catch (lockError) {
+        console.error('Failed to release activation email lock:', lockError);
+      }
+    }
+
     return res.status(500).json({
-      message: 'Failed to generate activation token'
+      message: 'Failed to resend activation email'
     });
   }
 };
+
 // Upload user profile image
 exports.uploadProfileImage = async (req, res) => {
   try {

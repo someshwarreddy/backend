@@ -1,7 +1,9 @@
+
 const express = require('express');
+const router = express.Router();
 const { verifyToken } = require('../middleware/verifyToken');
 const { allowRoles } = require('../middleware/checkRole');
-
+const upload = require('../middleware/upload');
 const {
   getAllUsers,
   getUserById,
@@ -9,8 +11,6 @@ const {
   resendActivation,
   uploadProfileImage
 } = require('../controllers/user.controller');
-const upload = require('../middleware/upload');
-const router = express.Router();
 
 // Get all users (Admin only)
 router.get(
@@ -19,7 +19,6 @@ router.get(
   allowRoles('admin'),
   getAllUsers
 );
-
 
 // Create user (Admin only)
 router.post(
@@ -35,10 +34,16 @@ router.get('/loggedin-user', verifyToken, (req, res) => {
 });
 
 // Admin-only test endpoint
-router.get('/admin-data', verifyToken, allowRoles('admin'), (req, res) => {
-  res.json({ message: 'Welcome admin' });
-});
-// Resend -activation endpoint
+router.get(
+  '/admin-data',
+  verifyToken,
+  allowRoles('admin'),
+  (req, res) => {
+    res.json({ message: 'Welcome admin' });
+  }
+);
+
+// Resend activation email (Admin only)
 router.post(
   '/:id/resend-activation',
   verifyToken,
@@ -46,6 +51,7 @@ router.post(
   resendActivation
 );
 
+// Upload profile image
 router.post(
   '/upload-profile-image',
   verifyToken,
@@ -53,33 +59,11 @@ router.post(
   uploadProfileImage
 );
 
-
-
-// Get user by ID (Admin only)
+// Get user by ID (Admin or Self, according to controller logic)
 router.get(
   '/:id',
   verifyToken,
   getUserById
 );
-// resend activation
-router.post(
-  '/:id/resend-activation',
-  verifyToken,
-  allowRoles('admin'),
-  resendActivation
-);
-// upload profile image
-router.post(
-  '/upload-profile-image',
-  (req, res, next) => {
-    console.log('UPLOAD ROUTE MATCHED');
-    next();
-  },
-  verifyToken,
-  upload.single('image'),
-  uploadProfileImage
-);
-// 
-router.get('/:id', verifyToken, getUserById);
 
 module.exports = router;

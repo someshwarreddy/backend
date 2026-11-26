@@ -48,6 +48,10 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null
     },
+    activationEmailLockUntil: {
+      type: Date,
+      default: null
+    },
     phone: {
       type: String,
       default: ''
